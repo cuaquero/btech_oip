@@ -31,6 +31,8 @@ export class Renderer {
     this.ctx = canvas.getContext('2d');
     this.sim = sim;
     this.labels = 'auto'; // auto | all | off
+    this.mode = 'graph';  // graph | grid
+    this.grid = null;
     this.sprites = {};
     for (const k in CATS) this.sprites[k] = glowSprite(CATS[k].color);
     this.groupColor = new Map();
@@ -68,6 +70,7 @@ export class Renderer {
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
+    if (this.mode === 'grid' && this.grid) { this.grid.draw(ctx, sim.w, sim.h, s); return; }
     ctx.fillStyle = BG;
     ctx.fillRect(0, 0, sim.w, sim.h);
     const vg = ctx.createRadialGradient(sim.w / 2, sim.h * 0.55, 0, sim.w / 2, sim.h * 0.55, Math.max(sim.w, sim.h) * 0.7);

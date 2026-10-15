@@ -35,6 +35,7 @@ function parseArgs(argv, cfg) {
     pcap: null,
     speed: 1,
     list: false,
+    localnet: cfg.localnet ?? null,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -45,6 +46,7 @@ function parseArgs(argv, cfg) {
     else if (a === '--filter' || a === '-f') o.filter = next();
     else if (a === '--pcap' || a === '-r') o.pcap = next();
     else if (a === '--speed') o.speed = Number(next()) || 1;
+    else if (a === '--localnet') o.localnet = next();
     else if (a === '--list') o.list = true;
     else if (a === '--help' || a === '-h') { console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 11).join('\n')); process.exit(0); }
     else { console.error(`Unknown option ${a}`); process.exit(1); }
@@ -212,7 +214,7 @@ function replay(rl) {
 
 // ---- http ------------------------------------------------------------------
 
-const status = () => ({ live, source: sourceLabel, error: liveError });
+const status = () => ({ live, source: sourceLabel, error: liveError, localnet: opts.localnet });
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'text/javascript',

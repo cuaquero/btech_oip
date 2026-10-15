@@ -28,6 +28,19 @@ export const DEMO_NAMES = {
 STUDENTS.forEach((ip, i) => { DEMO_NAMES[ip] = `Student ${i + 1}`; });
 LAB.forEach((ip, i) => { DEMO_NAMES[ip] = `Lab PC ${i + 1}`; });
 
+// extra hosts used only by the address-grid view, spread over several /24s
+const CROWD = [];
+for (let block = 3; block <= 60; block++) {
+  const count = 10 + Math.floor(Math.random() * 45);
+  const used = new Set();
+  while (used.size < count) used.add(2 + Math.floor(Math.random() * 250));
+  for (const host of [...used].sort((a, b) => a - b)) CROWD.push(`10.0.${block}.${host}`);
+}
+DEMO_NAMES['10.0.3.0/24'] = 'Lab C';
+DEMO_NAMES['10.0.4.0/24'] = 'Lab D';
+DEMO_NAMES['10.0.5.0/24'] = 'Library';
+DEMO_NAMES['10.0.6.0/24'] = 'Wi-Fi';
+
 const pick = (list) => list[Math.floor(Math.random() * list.length)];
 const rnd = (a, b) => a + Math.random() * (b - a);
 
@@ -58,15 +71,18 @@ const SCENARIOS = [
     caption: 'One computer pings every address on the network. Addresses that are in use answer. This is how a scanner finds live hosts.',
     seconds: 20,
     start(d) {
-      d.targets = [...STUDENTS, INSTRUCTOR, ...LAB.slice(0, 5), PRINTER, SERVERS.gateway, SERVERS.dns, SERVERS.files, SERVERS.web];
+      // with the grid view, sweep every address of one /24 in order
+      d.targets = d.crowd
+        ? Array.from({ length: 254 }, (_, i) => `10.0.4.${i + 1}`)
+        : [...STUDENTS, INSTRUCTOR, ...LAB.slice(0, 5), PRINTER, SERVERS.gateway, SERVERS.dns, SERVERS.files, SERVERS.web];
       d.cursor = 0;
     },
     run(d, dt) {
       d.chatter(dt, { web: 0.4 });
-      d.every(0.45, () => {
+      d.every(d.crowd ? 0.05 : 0.45, () => {
         const t = d.targets[d.cursor++ % d.targets.length];
         d.emit(LAB[5], t, 'icmp', 74);
-        d.after(0.25, () => d.emit(t, LAB[5], 'icmp', 74));
+        if (!d.crowd || CROWD.includes(t)) d.after(0.25, () => d.emit(t, LAB[5], 'icmp', 74));
       });
     },
   },
@@ -115,6 +131,7 @@ export class Demo {
     this.queue = [];
     this.timers = new Map();
     this.slot = 0;
+    this.crowd = false; // add many more hosts (for the address grid)
     this.index = -1;
     this.scenario = null;
     this.left = 4; // seconds of background traffic before the first scenario
@@ -159,6 +176,11 @@ export class Demo {
     if (poisson(0.3)) this.emit(pick(LAB), PRINTER, 'tcp', 1000);
     if (poisson(0.25)) this.emit(SERVERS.gateway, pick(clients), 'udp', 120);
     if (poisson(0.2)) this.emit(pick(clients), '10.0.1.255', 'other', 60);     // broadcast
+    if (this.crowd) {
+      if (poisson(45)) this.web(pick(CROWD), pick(OUTSIDE));
+      if (poisson(6)) { const who = pick(CROWD); this.emit(who, SERVERS.dns, 'dns', 78); this.after(0.3, () => this.emit(SERVERS.dns, who, 'dns', 140)); }
+      if (poisson(2)) this.emit(pick(CROWD), SERVERS.files, 'tcp', 1200);
+    }
   }
 
   next() {

@@ -1,10 +1,18 @@
 import { Sim, CATS } from './sim.js';
 import { Renderer } from './render.js';
 import { Demo, DEMO_NAMES } from './demo.js';
+import { GridView } from './grid.js';
 
 const $ = (id) => document.getElementById(id);
 const sim = new Sim();
 const view = new Renderer($('stage'), sim);
+const grid = new GridView(sim);
+view.grid = grid;
+const params = new URLSearchParams(location.search);
+if (params.get('view') === 'grid') { view.mode = 'grid'; document.body.classList.add('grid'); }
+
+// every packet feeds both views
+const feed = (ev) => { sim.ingest(ev); if (!sim.paused) grid.ingest(ev); };
 
 let mode = 'demo';          // demo | live
 let liveStatus = null;      // from /api/status, null when there is no server
@@ -17,8 +25,11 @@ let liveNames = {};
 function startDemo() {
   stopLive();
   sim.clear();
+  grid.clear();
+  grid.setNetwork('10.0.0.0/16', true);
   sim.names = { ...DEMO_NAMES };
-  demo = new Demo((ev) => sim.ingest(ev), showCaption);
+  demo = new Demo(feed, showCaption);
+  demo.crowd = view.mode === 'grid';
   mode = 'demo';
   setBadge();
 }
@@ -31,18 +42,23 @@ function startLive() {
   demo = null;
   showCaption(null);
   sim.clear();
+  grid.clear();
+  grid.fixedNet = false;
+  grid.net = null;
+  const net = params.get('net') || liveStatus?.localnet;
+  if (net) grid.setNetwork(net, true);
   sim.names = { ...liveNames };
   mode = 'live';
   setBadge();
   events = new EventSource('/events');
-  events.addEventListener('packets', (e) => { for (const p of JSON.parse(e.data)) sim.ingest(p); });
+  events.addEventListener('packets', (e) => { for (const p of JSON.parse(e.data)) feed(p); });
   events.addEventListener('name', (e) => { const n = JSON.parse(e.data); if (n.name) sim.names[n.ip] = n.name; });
   events.addEventListener('status', (e) => { liveStatus = JSON.parse(e.data); setBadge(); });
   events.onerror = () => { $('mode').textContent = 'Reconnecting'; $('mode').className = 'badge'; };
 }
 
 async function init() {
-  const forceDemo = new URLSearchParams(location.search).has('demo');
+  const forceDemo = params.has('demo');
   try {
     const ctl = new AbortController();
     setTimeout(() => ctl.abort(), 1500);
@@ -66,7 +82,17 @@ function setBadge() {
   let src = '';
   if (mode === 'live') src = liveStatus?.source || '';
   else if (liveStatus?.error) src = liveStatus.error;
-  $('source').textContent = src;
+  $('source').textContent = (view.mode === 'grid' && grid.net ? grid.label() + (src ? ' · ' : '') : '') + src;
+  $('talkers').hidden = view.mode === 'grid';
+}
+
+function setView(m) {
+  view.mode = m;
+  document.body.classList.toggle('grid', m === 'grid');
+  if (demo) { demo.crowd = m === 'grid'; sim.clear(); grid.clear(); if (mode === 'demo') grid.setNetwork('10.0.0.0/16', true); }
+  $('block').hidden = true;
+  $('tip').hidden = true;
+  setBadge();
 }
 
 function showCaption(s) {
@@ -111,6 +137,7 @@ function updateHud() {
     li.classList.toggle('quiet', r < 1);
   }
 
+  if (view.mode === 'grid') { updateBlock(); return; }
   const top = [...sim.nodes.values()]
     .filter((n) => n.bytes > 30)
     .sort((a, b) => b.bytes - a.bytes)
@@ -124,6 +151,27 @@ function updateHud() {
     const rate = document.createElement('span');
     rate.className = 'rate';
     rate.textContent = fmtBytes(n.bytes / 5);
+    li.append(name, rate);
+    return li;
+  }));
+}
+
+function updateBlock() {
+  const box = $('block');
+  const b = grid.blockSummary();
+  box.hidden = !b;
+  if (!b) return;
+  $('block-title').textContent = b.name ? `${b.name} (${b.cidr})` : b.cidr;
+  $('block-total').textContent = `${b.count} active hosts · ${fmtBytes(b.total)}`;
+  const list = $('block-list');
+  list.replaceChildren(...b.hosts.map((h) => {
+    const li = document.createElement('li');
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = h.name || h.ip;
+    const rate = document.createElement('span');
+    rate.className = 'rate';
+    rate.textContent = fmtBytes(h.rate);
     li.append(name, rate);
     return li;
   }));
@@ -145,10 +193,30 @@ setTimeout(() => $('hint').classList.add('gone'), 10000);
 
 let dragging = null;
 $('stage').addEventListener('pointerdown', (e) => {
+  if (view.mode === 'grid') {
+    const off = grid.cellAt(e.clientX, e.clientY);
+    const blk = off === null ? null : off >> 8;
+    grid.select(blk === grid.selected ? null : off);
+    updateBlock();
+    return;
+  }
   const n = view.nodeAt(e.clientX, e.clientY);
   if (n && !n.fixed) { dragging = n; n.pinned = true; $('stage').setPointerCapture(e.pointerId); }
 });
-$('stage').addEventListener('pointermove', (e) => { if (dragging) { dragging.x = e.clientX; dragging.y = e.clientY; } });
+$('stage').addEventListener('pointermove', (e) => {
+  if (view.mode === 'grid') {
+    grid.hover = grid.cellAt(e.clientX, e.clientY);
+    const tip = $('tip');
+    if (grid.hover === null) { tip.hidden = true; return; }
+    const d = grid.describe(grid.hover);
+    tip.textContent = `${d.name ? d.name + '  ' : ''}${d.ip}` + (d.rate > 1 ? `  ·  ${fmtBytes(d.rate)}` : d.idle < 1e6 ? `  ·  last seen ${Math.round(d.idle)}s ago` : '');
+    tip.style.left = Math.min(e.clientX + 16, innerWidth - tip.offsetWidth - 8) + 'px';
+    tip.style.top = (e.clientY + 16) + 'px';
+    tip.hidden = false;
+    return;
+  }
+  if (dragging) { dragging.x = e.clientX; dragging.y = e.clientY; }
+});
 $('stage').addEventListener('pointerup', () => { if (dragging) { dragging.pinned = false; dragging = null; } });
 
 addEventListener('keydown', (e) => {
@@ -160,6 +228,7 @@ addEventListener('keydown', (e) => {
       else startDemo();
       break;
     case 'n': case 'N': demo?.next(); break;
+    case 'g': case 'G': setView(view.mode === 'grid' ? 'graph' : 'grid'); break;
     case 'l': case 'L': view.labels = { auto: 'all', all: 'off', off: 'auto' }[view.labels]; break;
     case 'i': case 'I': sim.collapseInternet = !sim.collapseInternet; sim.clear(); break;
     case '+': case '=': sim.zoom = Math.min(2.2, sim.zoom + 0.15); sim.updateScale(); document.documentElement.style.setProperty('--u', `calc(clamp(14px, 1.15vw, 32px) * ${sim.zoom})`); break;
@@ -183,6 +252,7 @@ function frame(now) {
   if (!sim.paused) {
     demo?.update(Math.min(dt, 0.05));
     sim.step(dt);
+    grid.step(dt);
   }
   view.draw();
   hudClock += dt;
@@ -191,6 +261,6 @@ function frame(now) {
 }
 
 // handle for debugging in the browser console
-window.oip = { sim, view, get demo() { return demo; } };
+window.oip = { sim, view, grid, get demo() { return demo; } };
 
 init().then(() => requestAnimationFrame(frame));

@@ -21,6 +21,14 @@
     <ol id="talker-list"></ol>
   </aside>
 
+  <aside id="block" class="hud" hidden>
+    <h2 id="block-title"></h2>
+    <div id="block-total"></div>
+    <ol id="block-list"></ol>
+  </aside>
+
+  <div id="tip" class="hud" hidden></div>
+
   <footer id="bottom" class="hud">
     <ul id="legend"></ul>
     <div id="totals"><span id="pps">0</span> packets/s &middot; <span id="bps">0 bit/s</span></div>
@@ -37,6 +45,8 @@
     <h2>Controls</h2>
     <dl>
       <dt>Space</dt><dd>Pause / resume</dd>
+      <dt>G</dt><dd>Switch between the host graph and the address grid</dd>
+      <dt>Click</dt><dd>Grid: select a /24 block to see its busiest hosts</dd>
       <dt>D</dt><dd>Switch between live capture and demo</dd>
       <dt>N</dt><dd>Next demo scenario</dd>
       <dt>L</dt><dd>Host labels: auto, all, off</dd>

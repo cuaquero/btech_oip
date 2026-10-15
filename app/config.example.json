@@ -1,6 +1,7 @@
 {
   "interface": "6",
   "filter": "",
+  "localnet": "10.0.0.0/16",
   "port": 8080,
   "host": "127.0.0.1",
   "names": {

@@ -4,6 +4,15 @@ A browser-based rewrite of the OIP visualizer for a classroom display. Hosts are
 drawn as nodes grouped by subnet, and each packet is a glowing dot travelling
 from its source to its destination. The Internet is one node at the top.
 
+It has two views, switched with `G`:
+
+- **Graph**: hosts as nodes, packets travelling between them.
+- **Grid**: replaces the older `ipvisualizer` project. Every address in one
+  network (up to a /16) is a square, laid out so each /24 is a 16x16 block.
+  Squares light in the color of the traffic and fade over a few seconds.
+  Hover a square for its address, click a block for its busiest hosts. A ping
+  sweep shows up as a line crossing a block; a busy server as one bright square.
+
 It runs two ways:
 
 - **Demo**: simulated classroom traffic with short captioned scenarios (web
@@ -42,6 +51,7 @@ Other options:
 | `--pcap file.pcap` | Replay a capture file instead of capturing |
 | `--speed 2` | Replay speed multiplier |
 | `--port 8080` | HTTP port |
+| `--localnet 10.1.0.0/16` | Network shown in the grid (also `localnet` in config). If unset, the busiest private /16 seen is used |
 | `--host 0.0.0.0` | Listen on the network so another machine can show the page |
 
 Defaults can also go in `config.json` (copy `config.example.json`), including
@@ -60,6 +70,8 @@ the port. Keep it on `127.0.0.1` unless you need a second machine.
 | Key | Action |
 | --- | --- |
 | Space | Pause / resume |
+| G | Switch between graph and address grid |
+| Click | Grid: select a /24 block |
 | D | Switch between live and demo |
 | N | Next demo scenario |
 | L | Labels: auto, all, off |
@@ -70,7 +82,7 @@ the port. Keep it on `127.0.0.1` unless you need a second machine.
 | ? | Help |
 | Drag | Move a host |
 
-Add `?demo` to the URL to force demo mode.
+Add `?demo` to the URL to force demo mode, `?view=grid` to start on the grid, or `?net=10.1.0.0/16` to pick the grid network.
 
 ## Colors
 
@@ -91,8 +103,9 @@ Broadcast and multicast traffic appears as a ring expanding from the sender.
 
 - `server.mjs`: static files, tshark wrapper, Server-Sent Events stream
 - `public/js/sim.js`: hosts, links, packets, force layout
-- `public/js/render.js`: canvas drawing
+- `public/js/render.js`: canvas drawing for the graph
+- `public/js/grid.js`: address grid (Z-order layout, fade, hover and selection)
 - `public/js/demo.js`: simulated network and scenarios
 - `public/js/main.js`: sources, overlay, keyboard
 
-The original C++/SDL 1.2 implementation in the repository root is unchanged.
+The original C++/SDL 1.2 implementation in the repository root is unchanged. The grid replaces the separate `btech-ipvisualizer` project, whose firewall (ULOG) display is not carried over.
