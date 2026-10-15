@@ -1,7 +1,27 @@
 OIP
 ---
 
-**New:** a browser-based version for classroom displays lives in [`app/`](app/README.md). The C++ version described below is the original and is no longer maintained.
+Network display for classroom screens
+-------------------------------------
+
+[`app/`](app/README.md) is a browser-based rewrite of OIP for showing network traffic on a classroom display. It has two views, switched with the `G` key:
+
+- **Graph**: hosts as nodes grouped by subnet, with packets travelling between them (the original OIP idea).
+- **Address grid**: every address in a network (up to a /16) as a square, with each /24 as a block. This replaces the separate `btech-ipvisualizer` project.
+
+It runs in **demo mode** (simulated classroom traffic with captioned scenarios such as a ping sweep or port scan, no setup needed) or **live mode** (real traffic captured with `tshark`). It needs Node 20+ and, for live capture, Wireshark. There is nothing to install with npm.
+
+```
+cd app
+node server.mjs
+```
+
+Then open http://localhost:8080 and press `F` for full screen. See [`app/README.md`](app/README.md) for live capture, configuration, controls and how to see the whole classroom (a capture only sees traffic that reaches the capturing machine, so use a mirror port or the gateway).
+
+Original C++ version
+--------------------
+
+Everything below describes the original C++/SDL 1.2 implementation. It is no longer maintained and is kept for reference.
 
 OrganicIP (OIP) visualizer uses libpcap and Simple DirectMedia Layer (SDL) to visualize IP traffic between endpoints.
 
