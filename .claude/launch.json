@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "oip-display",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["app/server.mjs"],
+      "port": 8080
+    }
+  ]
+}
