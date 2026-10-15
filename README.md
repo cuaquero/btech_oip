@@ -1,6 +1,8 @@
 OIP
 ---
 
+**New:** a browser-based version for classroom displays lives in [`app/`](app/README.md). The C++ version described below is the original and is no longer maintained.
+
 OrganicIP (OIP) visualizer uses libpcap and Simple DirectMedia Layer (SDL) to visualize IP traffic between endpoints.
 
 Supported Distributions
