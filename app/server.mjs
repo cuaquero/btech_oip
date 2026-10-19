@@ -216,12 +216,12 @@ function startRemote(baseArgs) {
   const key = opts.sshKey && opts.sshKey.replace(/^~/, os.homedir());
   // the capture's own SSH session crosses the monitored link; keep it out of the display
   const hide = /^\d+\.\d+\.\d+\.\d+$/.test(host) ? ['-Y', `not (tcp.port == 22 and ip.addr == ${host})`] : [];
-  const tsArgs = [...baseArgs, ...hide, '-r', '-'];
+  // `-i -` reads a live pcap stream from stdin (`-r -` waits for end of file on Linux)
+  const tsArgs = [...baseArgs, ...hide, '-i', '-'];
   sourceLabel = `${opts.ssh} (SSH capture)`;
 
   let fails = 0;
   const connect = () => {
-    const started = Date.now();
     let gotData = false;
     let lastErr = '';
     const sshArgs = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=15',
@@ -245,19 +245,26 @@ function startRemote(baseArgs) {
       const p = parseLine(l);
       if (p) { gotData = true; onPacket(p); }
     });
+    ts.stderr.on('data', (d) => {
+      const line = d.toString().trim().split('\n').pop();
+      if (line && !/^Capturing on/.test(line)) lastErr = `tshark: ${line}`;
+    });
+    // if the parser dies the stream is useless, so drop the connection and start over
+    ts.on('exit', () => ssh.kill());
 
     ssh.on('exit', (code) => {
       ts.kill();
       live = false;
       const authFailed = /permission denied|host key verification|no matching|too many authentication/i.test(lastErr);
       fails = gotData ? 0 : fails + 1;
-      // never hammer the remote login: a refused key is not retried (it can trigger a lockout)
-      if (authFailed || fails >= 5) {
-        liveError = `SSH capture stopped: ${lastErr || 'exit ' + code}. Not retrying; fix it and restart.`;
+      // a refused key is never retried: repeated failed logins can trigger a remote lockout
+      if (authFailed) {
+        liveError = `SSH capture stopped: ${lastErr}. Not retrying; fix it and restart.`;
         console.error(liveError);
         broadcast('status', status());
         return;
       }
+      // anything else (network down, remote reboot) retries with a growing delay, capped at 5 minutes
       const delay = Math.min(300, 5 * 2 ** fails);
       liveError = `SSH capture lost (${lastErr || 'exit ' + code}). Retrying in ${delay}s.`;
       console.error(liveError);
