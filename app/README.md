@@ -65,6 +65,41 @@ switched port you will see only that machine's own traffic.
 Listening on `0.0.0.0` exposes who is talking to whom to anyone who can reach
 the port. Keep it on `127.0.0.1` unless you need a second machine.
 
+## Capturing on a firewall or router over SSH
+
+If a firewall sits in the path (for example OPNsense), it already sees every
+packet that crosses VLANs, so no mirror port is needed. The server can run the
+capture there and stream it back:
+
+```
+node server.mjs --ssh oipcap@192.168.200.1 --ssh-key ~/.ssh/oip_capture_ed25519
+```
+
+or in `config.json`:
+
+```json
+{ "capture": { "ssh": "oipcap@192.168.200.1", "key": "~/.ssh/oip_capture_ed25519" } }
+```
+
+On the firewall, create a user whose key is restricted to a single command in
+`authorized_keys`, and allow that one command with `sudo`:
+
+```
+command="/usr/local/bin/sudo /usr/sbin/tcpdump -i vlan0.200 -n -s 96 -U -w -",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 AAAA... oip-capture
+```
+
+```
+oipcap ALL=(root) NOPASSWD: /usr/sbin/tcpdump -i vlan0.200 -n -s 96 -U -w -
+```
+
+Notes:
+
+- Capture on the VLAN interface, not the WAN. Behind NAT, WAN traffic shows only the firewall's address.
+- A firewall only sees traffic that crosses it. Hosts talking within one VLAN need a mirror port.
+- `-s 96` keeps only headers, which is all the display uses.
+- The capture's own SSH session is hidden from the display.
+- If a connection drops it retries with a growing delay. A refused key, or five instant failures in a row, stops the retries, so a bad key cannot trigger the firewall's login lockout.
+
 ## Controls
 
 | Key | Action |

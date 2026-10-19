@@ -14,6 +14,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import dns from 'node:dns/promises';
 import { spawn, spawnSync } from 'node:child_process';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -36,6 +37,8 @@ function parseArgs(argv, cfg) {
     speed: 1,
     list: false,
     localnet: cfg.localnet ?? null,
+    ssh: cfg.capture?.ssh ?? null,       // user@host running a forced tcpdump
+    sshKey: cfg.capture?.key ?? null,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -47,6 +50,8 @@ function parseArgs(argv, cfg) {
     else if (a === '--pcap' || a === '-r') o.pcap = next();
     else if (a === '--speed') o.speed = Number(next()) || 1;
     else if (a === '--localnet') o.localnet = next();
+    else if (a === '--ssh') o.ssh = next();
+    else if (a === '--ssh-key') o.sshKey = next();
     else if (a === '--list') o.list = true;
     else if (a === '--help' || a === '-h') { console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 11).join('\n')); process.exit(0); }
     else { console.error(`Unknown option ${a}`); process.exit(1); }
@@ -165,6 +170,11 @@ function startLive() {
   const args = ['-l', '-n', '-T', 'fields'];
   for (const f of FIELDS) args.push('-e', f);
 
+  if (opts.ssh) {
+    startRemote(args);
+    return;
+  }
+
   if (opts.pcap) {
     args.push('-r', opts.pcap);
     sourceLabel = path.basename(opts.pcap);
@@ -196,6 +206,67 @@ function startLive() {
 
   const rl = readline.createInterface({ input: child.stdout });
   if (opts.pcap) replay(rl); else rl.on('line', (l) => { const p = parseLine(l); if (p) onPacket(p); });
+}
+
+// Capture on another machine (e.g. a firewall) over SSH. The remote end is
+// expected to run a single forced tcpdump that writes a pcap stream to stdout;
+// tshark here reads that stream from stdin.
+function startRemote(baseArgs) {
+  const host = opts.ssh.split('@').pop();
+  const key = opts.sshKey && opts.sshKey.replace(/^~/, os.homedir());
+  // the capture's own SSH session crosses the monitored link; keep it out of the display
+  const hide = /^\d+\.\d+\.\d+\.\d+$/.test(host) ? ['-Y', `not (tcp.port == 22 and ip.addr == ${host})`] : [];
+  const tsArgs = [...baseArgs, ...hide, '-r', '-'];
+  sourceLabel = `${opts.ssh} (SSH capture)`;
+
+  let fails = 0;
+  const connect = () => {
+    const started = Date.now();
+    let gotData = false;
+    let lastErr = '';
+    const sshArgs = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=15',
+      '-o', 'ServerAliveCountMax=3', '-o', 'PreferredAuthentications=publickey'];
+    if (key) sshArgs.push('-i', key, '-o', 'IdentitiesOnly=yes');
+    sshArgs.push(opts.ssh, 'capture');
+
+    const ssh = spawn('ssh', sshArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const ts = spawn(tshark, tsArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
+    ssh.stdout.pipe(ts.stdin);
+    ts.stdin.on('error', () => {});
+    live = true;
+    liveError = null;
+    broadcast('status', status());
+
+    ssh.stderr.on('data', (d) => {
+      const line = d.toString().trim().split('\n').pop();
+      if (line && !/^tcpdump: (listening|verbose)/.test(line)) lastErr = line;
+    });
+    readline.createInterface({ input: ts.stdout }).on('line', (l) => {
+      const p = parseLine(l);
+      if (p) { gotData = true; onPacket(p); }
+    });
+
+    ssh.on('exit', (code) => {
+      ts.kill();
+      live = false;
+      const authFailed = /permission denied|host key verification|no matching|too many authentication/i.test(lastErr);
+      fails = gotData ? 0 : fails + 1;
+      // never hammer the remote login: a refused key is not retried (it can trigger a lockout)
+      if (authFailed || fails >= 5) {
+        liveError = `SSH capture stopped: ${lastErr || 'exit ' + code}. Not retrying; fix it and restart.`;
+        console.error(liveError);
+        broadcast('status', status());
+        return;
+      }
+      const delay = Math.min(300, 5 * 2 ** fails);
+      liveError = `SSH capture lost (${lastErr || 'exit ' + code}). Retrying in ${delay}s.`;
+      console.error(liveError);
+      broadcast('status', status());
+      setTimeout(connect, delay * 1000);
+    });
+    process.on('exit', () => { ssh.kill(); ts.kill(); });
+  };
+  connect();
 }
 
 // pace a capture file by its own timestamps
