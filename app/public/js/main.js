@@ -58,7 +58,9 @@ function startLive() {
 }
 
 async function init() {
-  const forceDemo = params.has('demo');
+  // ?demo never talks to a server, so it works on any static host and never
+  // triggers a login prompt from a server that answers /api/status with a 401
+  if (params.has('demo')) { startDemo(); return; }
   try {
     const ctl = new AbortController();
     setTimeout(() => ctl.abort(), 1500);
@@ -67,7 +69,7 @@ async function init() {
     liveNames = liveStatus.names || {};
   } catch { liveStatus = null; }
 
-  if (liveStatus?.live && !forceDemo) startLive();
+  if (liveStatus?.live) startLive();
   else startDemo();
 }
 
