@@ -14,6 +14,30 @@ if (params.get('view') === 'grid') { view.mode = 'grid'; document.body.classList
 // every packet feeds both views
 const feed = (ev) => { sim.ingest(ev); if (!sim.paused) grid.ingest(ev); };
 
+// A capture often delivers packets in bursts (the firewall's tcpdump can hold them
+// for up to a second). Drawn as they arrive, a second of traffic would appear at once
+// and then nothing. Instead each burst is spread across the time since the previous
+// one, so traffic flows steadily. It adds about one burst interval of delay.
+// ?smooth=0 turns this off.
+const smooth = params.get('smooth') !== '0';
+const pending = [];         // packets waiting for their turn: { due, p }
+let lastBatchAt = 0;
+let batchGap = 100;         // smoothed time between bursts, in ms
+
+function queueBatch(list) {
+  if (!smooth || list.length === 0 || pending.length > 5000) { for (const p of list) feed(p); return; }
+  const now = performance.now();
+  if (lastBatchAt) batchGap = 0.7 * batchGap + 0.3 * Math.min(1500, Math.max(20, now - lastBatchAt));
+  lastBatchAt = now;
+  const n = list.length;
+  list.forEach((p, i) => pending.push({ due: now + (i / n) * batchGap, p }));
+  pending.sort((a, b) => a.due - b.due);
+}
+
+function releaseDue(now) {
+  while (pending.length && pending[0].due <= now) feed(pending.shift().p);
+}
+
 let mode = 'demo';          // demo | live
 let liveStatus = null;      // from /api/status, null when there is no server
 let demo = null;
@@ -36,6 +60,7 @@ function startDemo() {
 
 function stopLive() {
   if (events) { events.close(); events = null; }
+  pending.length = 0;
 }
 
 function startLive() {
@@ -52,7 +77,9 @@ function startLive() {
   setBadge();
   // relative, so the page also works when another server mounts it under a path (e.g. /oip/)
   events = new EventSource('events');
-  events.addEventListener('packets', (e) => { for (const p of JSON.parse(e.data)) feed(p); });
+  pending.length = 0;
+  lastBatchAt = 0;
+  events.addEventListener('packets', (e) => queueBatch(JSON.parse(e.data)));
   events.addEventListener('name', (e) => { const n = JSON.parse(e.data); if (n.name) sim.names[n.ip] = n.name; });
   events.addEventListener('status', (e) => { liveStatus = JSON.parse(e.data); setBadge(); });
   events.onerror = () => { $('mode').textContent = 'Reconnecting'; $('mode').className = 'badge'; };
@@ -252,6 +279,7 @@ let hudClock = 0;
 function frame(now) {
   const dt = (now - last) / 1000;
   last = now;
+  releaseDue(now);
   if (!sim.paused) {
     demo?.update(Math.min(dt, 0.05));
     sim.step(dt);
@@ -264,6 +292,6 @@ function frame(now) {
 }
 
 // handle for debugging in the browser console
-window.oip = { sim, view, grid, get demo() { return demo; } };
+window.oip = { sim, view, grid, get demo() { return demo; }, get queued() { return pending.length; } };
 
 init().then(() => requestAnimationFrame(frame));
