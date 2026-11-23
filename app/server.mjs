@@ -16,6 +16,7 @@ import dns from 'node:dns/promises';
 import { spawn, spawnSync } from 'node:child_process';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { Aliaser, loadSecret } from './alias.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pub = path.join(here, 'public');
@@ -39,6 +40,9 @@ function parseArgs(argv, cfg) {
     localnet: cfg.localnet ?? null,
     ssh: cfg.capture?.ssh ?? null,       // user@host running a forced tcpdump
     sshKey: cfg.capture?.key ?? null,
+    publicPort: cfg.publicPort ?? null,  // second listener that only serves aliased data
+    publicHost: cfg.publicHost ?? null,
+    alias: false,                        // make the main listener aliased too
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -52,6 +56,9 @@ function parseArgs(argv, cfg) {
     else if (a === '--localnet') o.localnet = next();
     else if (a === '--ssh') o.ssh = next();
     else if (a === '--ssh-key') o.sshKey = next();
+    else if (a === '--public-port') o.publicPort = Number(next());
+    else if (a === '--public-host') o.publicHost = next();
+    else if (a === '--alias') o.alias = true;
     else if (a === '--list') o.list = true;
     else if (a === '--help' || a === '-h') { console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 11).join('\n')); process.exit(0); }
     else { console.error(`Unknown option ${a}`); process.exit(1); }
@@ -143,25 +150,74 @@ function resolveName(ip, onName) {
 
 // ---- event stream ----------------------------------------------------------
 
-const clients = new Set();
+// Two kinds of viewers. "raw" viewers get real addresses and names. "alias"
+// viewers (the public listener) only ever get aliases: real values are replaced
+// before anything is written to them.
+const rawClients = new Set();
+const aliasClients = new Set();
 let batch = [];
 let live = false;
 let liveError = null;
 let sourceLabel = null;
+let replayRead = false;    // pcap replay: tshark has read the whole file
 
-function broadcast(event, data) {
+const aliaser = (opts.publicPort || opts.alias)
+  ? new Aliaser(loadSecret(path.join(here, '.alias-secret'), cfg.aliasSecret))
+  : null;
+const aliasNames = {};     // fake address or fake /24 -> display name
+const newAliasNames = [];  // names alias viewers have not been sent yet
+
+function send(set, event, data) {
   const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-  for (const res of clients) res.write(msg);
+  for (const res of set) res.write(msg);
+}
+
+// raw viewers only (reverse-DNS names are real)
+function broadcast(event, data) { send(rawClients, event, data); }
+
+function broadcastStatus() {
+  send(rawClients, 'status', status());
+  if (aliaser) send(aliasClients, 'status', aliasStatus());
+}
+
+// the alias for one address, naming the fake host and its fake /24 the first time they appear
+function aliasAddr(real) {
+  const fake = aliaser.map(real);
+  if (/^(10\.|fd)/i.test(fake) && aliasNames[fake] === undefined) {
+    aliasNames[fake] = aliaser.name(fake);
+    newAliasNames.push({ ip: fake, name: aliasNames[fake] });
+    if (!fake.includes(':')) {
+      const net = fake.replace(/\d+$/, '0') + '/24';
+      if (aliasNames[net] === undefined) {
+        aliasNames[net] = aliaser.zone(net);
+        newAliasNames.push({ ip: net, name: aliasNames[net] });
+      }
+    }
+  }
+  return fake;
 }
 
 setInterval(() => {
-  if (batch.length && clients.size) broadcast('packets', batch);
+  if (batch.length) {
+    if (rawClients.size) send(rawClients, 'packets', batch);
+    if (aliaser) {
+      // always alias, even with no viewer, so a viewer that connects later gets every name
+      const mapped = batch.map((p) => ({ s: aliasAddr(p.s), d: aliasAddr(p.d), c: p.c, b: p.b }));
+      const fresh = newAliasNames.splice(0);
+      if (aliasClients.size) {
+        for (const n of fresh) send(aliasClients, 'name', n);
+        send(aliasClients, 'packets', mapped);
+      }
+    }
+  }
   batch = [];
 }, 50);
 
 function onPacket(p) {
-  resolveName(p.s, (ip, n) => broadcast('name', { ip, name: n }));
-  resolveName(p.d, (ip, n) => broadcast('name', { ip, name: n }));
+  if (!opts.alias) {
+    resolveName(p.s, (ip, n) => broadcast('name', { ip, name: n }));
+    resolveName(p.d, (ip, n) => broadcast('name', { ip, name: n }));
+  }
   if (batch.length < 2000) batch.push(p);
 }
 
@@ -198,9 +254,11 @@ function startLive() {
     }
   });
   child.on('exit', (code) => {
-    live = false;
     if (!liveError && code) liveError = `capture stopped (exit ${code})`;
-    broadcast('status', status());
+    // tshark reads a whole file almost at once; the replay below keeps the source live until it drains
+    if (opts.pcap && !code) { replayRead = true; return; }
+    live = false;
+    broadcastStatus();
   });
   process.on('exit', () => child.kill());
 
@@ -235,7 +293,7 @@ function startRemote(baseArgs) {
     ts.stdin.on('error', () => {});
     live = true;
     liveError = null;
-    broadcast('status', status());
+    broadcastStatus();
 
     ssh.stderr.on('data', (d) => {
       const line = d.toString().trim().split('\n').pop();
@@ -261,14 +319,14 @@ function startRemote(baseArgs) {
       if (authFailed) {
         liveError = `SSH capture stopped: ${lastErr}. Not retrying; fix it and restart.`;
         console.error(liveError);
-        broadcast('status', status());
+        broadcastStatus();
         return;
       }
       // anything else (network down, remote reboot) retries with a growing delay, capped at 5 minutes
       const delay = Math.min(300, 5 * 2 ** fails);
       liveError = `SSH capture lost (${lastErr || 'exit ' + code}). Retrying in ${delay}s.`;
       console.error(liveError);
-      broadcast('status', status());
+      broadcastStatus();
       setTimeout(connect, delay * 1000);
     });
     process.on('exit', () => { ssh.kill(); ts.kill(); });
@@ -282,7 +340,11 @@ function replay(rl) {
   let t0 = null, wall0 = null;
   rl.on('line', (l) => { const p = parseLine(l); if (p) queue.push(p); });
   const timer = setInterval(() => {
-    if (!queue.length) return;
+    if (!queue.length) {
+      // everything read and played: the replay is over
+      if (replayRead) { live = false; broadcastStatus(); clearInterval(timer); }
+      return;
+    }
     if (t0 === null) { t0 = queue[0].t; wall0 = Date.now(); }
     const elapsed = ((Date.now() - wall0) / 1000) * opts.speed;
     while (queue.length && queue[0].t - t0 <= elapsed) onPacket(queue.shift());
@@ -294,48 +356,79 @@ function replay(rl) {
 
 const status = () => ({ live, source: sourceLabel, error: liveError, localnet: opts.localnet });
 
+// what an alias viewer may know: no addresses, hostnames, interface, user or error text
+const aliasStatus = () => ({
+  live,
+  source: live ? 'Live capture' : null,
+  error: liveError ? 'Live capture is not available' : null,
+  localnet: opts.localnet ? aliaser.cidr(opts.localnet) : null,
+});
+
 const TYPES = {
   '.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'text/javascript',
   '.mjs': 'text/javascript', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png',
 };
 
-const server = http.createServer((req, res) => {
-  const url = new URL(req.url, 'http://x');
+function makeHandler(aliased) {
+  return (req, res) => {
+    const url = new URL(req.url, 'http://x');
 
-  if (url.pathname === '/api/status') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ...status(), names }));
-  }
+    if (url.pathname === '/api/status') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(aliased ? { ...aliasStatus(), names: aliasNames } : { ...status(), names }));
+    }
 
-  if (url.pathname === '/events') {
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
+    if (url.pathname === '/events') {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      });
+      res.write(`event: status\ndata: ${JSON.stringify(aliased ? aliasStatus() : status())}\n\n`);
+      if (aliased) {
+        for (const [ip, name] of Object.entries(aliasNames)) res.write(`event: name\ndata: ${JSON.stringify({ ip, name })}\n\n`);
+      }
+      const set = aliased ? aliasClients : rawClients;
+      set.add(res);
+      req.on('close', () => set.delete(res));
+      return;
+    }
+
+    const rel = url.pathname === '/' ? 'index.html' : decodeURIComponent(url.pathname).replace(/^\/+/, '');
+    const file = path.join(pub, rel);
+    if (!file.startsWith(pub + path.sep)) { res.writeHead(403); return res.end(); }
+    fs.readFile(file, (err, data) => {
+      if (err) { res.writeHead(404); return res.end('Not found'); }
+      res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream' });
+      res.end(data);
     });
-    res.write(`event: status\ndata: ${JSON.stringify(status())}\n\n`);
-    clients.add(res);
-    req.on('close', () => clients.delete(res));
-    return;
-  }
-
-  const rel = url.pathname === '/' ? 'index.html' : decodeURIComponent(url.pathname).replace(/^\/+/, '');
-  const file = path.join(pub, rel);
-  if (!file.startsWith(pub + path.sep)) { res.writeHead(403); return res.end(); }
-  fs.readFile(file, (err, data) => {
-    if (err) { res.writeHead(404); return res.end('Not found'); }
-    res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream' });
-    res.end(data);
-  });
-});
+  };
+}
 
 startLive();
 
-server.listen(opts.port, opts.host, () => {
-  const shown = opts.host === '0.0.0.0' ? 'localhost' : opts.host;
-  console.log(`OIP display: http://${shown}:${opts.port}`);
+if (opts.publicPort && opts.publicPort === opts.port) {
+  console.error('publicPort must differ from port');
+  process.exit(1);
+}
+
+const shown = (h) => (h === '0.0.0.0' ? 'localhost' : h);
+const isLocal = (h) => h === '127.0.0.1' || h === 'localhost';
+
+http.createServer(makeHandler(opts.alias)).listen(opts.port, opts.host, () => {
+  console.log(`OIP display${opts.alias ? ' (aliased)' : ''}: http://${shown(opts.host)}:${opts.port}`);
   console.log(live ? `Capturing from ${sourceLabel}` : liveError || 'Demo mode');
-  if (opts.host !== '127.0.0.1' && opts.host !== 'localhost') {
-    console.log('Listening on the network: anyone who can reach this port can see traffic metadata.');
+  if (!isLocal(opts.host)) {
+    console.log(opts.alias
+      ? 'Listening on the network. Only aliased data is served.'
+      : 'Listening on the network: anyone who can reach this port can see traffic metadata.');
   }
 });
+
+if (opts.publicPort) {
+  const host = opts.publicHost ?? opts.host;
+  http.createServer(makeHandler(true)).listen(opts.publicPort, host, () => {
+    console.log(`OIP public display (aliased only): http://${shown(host)}:${opts.publicPort}`);
+    console.log('Real addresses and names never leave this process on that port.');
+  });
+}

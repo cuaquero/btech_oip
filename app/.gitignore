@@ -1,0 +1,3 @@
+# local settings and secrets: never commit these
+config.json
+.alias-secret

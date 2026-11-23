@@ -4,6 +4,7 @@
   "localnet": "10.0.0.0/16",
   "capture": { "ssh": "oipcap@192.168.200.1", "key": "~/.ssh/oip_capture_ed25519" },
   "port": 8080,
+  "publicPort": 8091,
   "host": "127.0.0.1",
   "names": {
     "10.0.0.1": "Gateway",
