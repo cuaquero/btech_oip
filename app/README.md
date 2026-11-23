@@ -135,6 +135,11 @@ The mapping is keyed by a secret in `app/.alias-secret`, created on first run
 alias across restarts and nothing can be reversed from the output. Delete the file
 to give every device a new alias. Keep it out of backups that others can read.
 
+The page requests `api/status` and `events` relative to its own address, so
+another server can relay the public port under a path (for example `/oip/`) and
+the page works there unchanged. Serve it with a trailing slash (`/oip/`). The
+relay must not buffer or compress `events`, which is a long-lived stream.
+
 What aliasing does not hide: how much traffic there is, when it happens, which
 protocols are used, how many devices are active, and which devices talk to which
 (under their aliases). Someone who knows how a particular device behaves could

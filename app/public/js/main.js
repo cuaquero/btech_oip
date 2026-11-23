@@ -50,7 +50,8 @@ function startLive() {
   sim.names = { ...liveNames };
   mode = 'live';
   setBadge();
-  events = new EventSource('/events');
+  // relative, so the page also works when another server mounts it under a path (e.g. /oip/)
+  events = new EventSource('events');
   events.addEventListener('packets', (e) => { for (const p of JSON.parse(e.data)) feed(p); });
   events.addEventListener('name', (e) => { const n = JSON.parse(e.data); if (n.name) sim.names[n.ip] = n.name; });
   events.addEventListener('status', (e) => { liveStatus = JSON.parse(e.data); setBadge(); });
@@ -64,7 +65,7 @@ async function init() {
   try {
     const ctl = new AbortController();
     setTimeout(() => ctl.abort(), 1500);
-    const r = await fetch('/api/status', { signal: ctl.signal });
+    const r = await fetch('api/status', { signal: ctl.signal });
     liveStatus = await r.json();
     liveNames = liveStatus.names || {};
   } catch { liveStatus = null; }
