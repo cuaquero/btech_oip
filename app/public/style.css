@@ -174,3 +174,15 @@ body.grid #caption {
   text-align: left;
 }
 body.grid #block { top: calc(var(--u) * 1.1); }
+
+/* ?fps=1: frame rate and detail level, for checking a player */
+#fps {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--u) * 0.3);
+  transform: translateX(-50%);
+  font-size: calc(var(--u) * 0.7);
+  color: var(--muted);
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}

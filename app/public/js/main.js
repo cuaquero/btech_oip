@@ -16,21 +16,37 @@ const feed = (ev) => { sim.ingest(ev); if (!sim.paused) grid.ingest(ev); };
 
 // A capture often delivers packets in bursts (the firewall's tcpdump can hold them
 // for up to a second). Drawn as they arrive, a second of traffic would appear at once
-// and then nothing. Instead each burst is spread across the time since the previous
-// one, so traffic flows steadily. It adds about one burst interval of delay.
-// ?smooth=0 turns this off.
+// and then nothing. Instead packets are played back at their real capture times, a
+// little behind live, like a jitter buffer in audio. If a packet arrives later than
+// its slot the buffer widens instead of bunching them up. ?smooth=0 turns this off.
 const smooth = params.get('smooth') !== '0';
+const BUFFER_MS = 1400;     // how far behind live to play: more than the source's burst interval
+const MAX_BEHIND_MS = 4000; // beyond this the playback clock is reset
 const pending = [];         // packets waiting for their turn: { due, p }
+let offset = null;          // local ms minus capture-time ms
 let lastBatchAt = 0;
-let batchGap = 100;         // smoothed time between bursts, in ms
+let batchGap = 100;         // smoothed time between bursts, in ms (for sources without timestamps)
 
 function queueBatch(list) {
   if (!smooth || list.length === 0 || pending.length > 5000) { for (const p of list) feed(p); return; }
   const now = performance.now();
-  if (lastBatchAt) batchGap = 0.7 * batchGap + 0.3 * Math.min(1500, Math.max(20, now - lastBatchAt));
-  lastBatchAt = now;
-  const n = list.length;
-  list.forEach((p, i) => pending.push({ due: now + (i / n) * batchGap, p }));
+  const timed = typeof list[0].t === 'number';
+  if (timed) {
+    let minT = Infinity, maxT = -Infinity;
+    for (const p of list) { if (p.t < minT) minT = p.t; if (p.t > maxT) maxT = p.t; }
+    if (offset === null) offset = now + BUFFER_MS - minT * 1000;
+    let early = minT * 1000 + offset - now; // ms until the oldest packet of this burst is due
+    if (early < 0) { offset += -early + 50; early = 50; }                      // late: widen the buffer
+    else if (early > BUFFER_MS + 500) { offset -= (early - BUFFER_MS) * 0.05; } // too far behind: close slowly
+    if (maxT * 1000 + offset - now > MAX_BEHIND_MS) offset = now + BUFFER_MS - minT * 1000; // clock jumped: resync
+    for (const p of list) pending.push({ due: p.t * 1000 + offset, p });
+  } else {
+    // no timestamps: spread the burst evenly over the time since the previous one
+    if (lastBatchAt) batchGap = 0.7 * batchGap + 0.3 * Math.min(1500, Math.max(20, now - lastBatchAt));
+    lastBatchAt = now;
+    const n = list.length;
+    list.forEach((p, i) => pending.push({ due: now + (i / n) * batchGap, p }));
+  }
   pending.sort((a, b) => a.due - b.due);
 }
 
@@ -79,6 +95,7 @@ function startLive() {
   events = new EventSource('events');
   pending.length = 0;
   lastBatchAt = 0;
+  offset = null;
   events.addEventListener('packets', (e) => queueBatch(JSON.parse(e.data)));
   events.addEventListener('name', (e) => { const n = JSON.parse(e.data); if (n.name) sim.names[n.ip] = n.name; });
   events.addEventListener('status', (e) => { liveStatus = JSON.parse(e.data); setBadge(); });
@@ -276,9 +293,46 @@ addEventListener('keydown', (e) => {
 
 let last = performance.now();
 let hudClock = 0;
+// ---- keeping up on a slow screen ------------------------------------------
+// When a screen cannot keep up, drawing less detail helps more than dropping frames.
+// The detail level drops quickly when frames are slow and returns slowly when they are
+// fast again. ?q=0|1|2 fixes it; ?fps=1 shows the frame rate and the level.
+const fixedQuality = params.has('q') ? Math.max(0, Math.min(2, Number(params.get('q')) || 0)) : null;
+if (fixedQuality !== null) view.quality = fixedQuality;
+let workEma = 4;            // ms of our own work per frame (smoothed)
+let gapEma = 16.7;          // ms between frames (smoothed)
+let calm = 0;               // seconds the screen has been comfortably fast
+let changedAt = 0;
+let noUpgradeUntil = 0;
+const fpsBox = params.has('fps') ? document.body.appendChild(Object.assign(document.createElement('div'), { id: 'fps' })) : null;
+
+// a hidden page has its frames throttled, which says nothing about the screen's speed:
+// when it comes back, start again from full detail
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  workEma = 4; gapEma = 16.7; calm = 0; changedAt = performance.now(); noUpgradeUntil = 0;
+  if (fixedQuality === null) view.quality = 2;
+});
+
+function adapt(dt, workMs, now) {
+  if (dt > 1 || document.hidden) return; // first frame, or the page is hidden
+  workEma += (workMs - workEma) * 0.05;
+  gapEma += (dt * 1000 - gapEma) * 0.05;
+  if (fixedQuality !== null) return;
+  if ((workEma > 14 || gapEma > 45) && view.quality > 0 && now - changedAt > 3000) {
+    view.quality--; changedAt = now; noUpgradeUntil = now + 60000; calm = 0;
+  } else if (workEma < 6 && gapEma < 25) {
+    calm += dt;
+    if (calm > 20 && view.quality < 2 && now > noUpgradeUntil) { view.quality++; changedAt = now; calm = 0; }
+  } else {
+    calm = 0;
+  }
+}
+
 function frame(now) {
   const dt = (now - last) / 1000;
   last = now;
+  const started = performance.now();
   releaseDue(now);
   if (!sim.paused) {
     demo?.update(Math.min(dt, 0.05));
@@ -286,8 +340,13 @@ function frame(now) {
     grid.step(dt);
   }
   view.draw();
+  adapt(dt, performance.now() - started, now);
   hudClock += dt;
-  if (hudClock > 0.25) { hudClock = 0; updateHud(); }
+  if (hudClock > 0.25) {
+    hudClock = 0;
+    updateHud();
+    if (fpsBox) fpsBox.textContent = `${Math.round(1000 / gapEma)} fps · ${workEma.toFixed(1)} ms of work · detail ${view.quality}`;
+  }
   requestAnimationFrame(frame);
 }
 

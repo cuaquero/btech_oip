@@ -11,7 +11,10 @@ export const CATS = {
 };
 
 const MAX_PARTICLES = 1600;
-const LINK_BUDGET = 40;          // max packets per second drawn on one link
+// Packets drawn per second on one link, per direction. A busy flow is thinned to this
+// so individual packets stay readable; each drawn packet is sized by the bytes it stands for.
+const LINK_RATE = 14;
+const LINK_BURST = 6;
 const NODE_IDLE_SECONDS = 90;
 
 export function isPrivate(ip) {
@@ -98,7 +101,8 @@ export class Sim {
   linkBetween(a, b) {
     const key = a.id < b.id ? a.id + '|' + b.id : b.id + '|' + a.id;
     let l = this.links.get(key);
-    if (!l) { l = { a, b, w: 0, tokens: LINK_BUDGET }; this.links.set(key, l); }
+    // index 0 is a -> b, index 1 is b -> a; each direction has its own budget and skipped-byte tally
+    if (!l) { l = { a, b, w: 0, tok: [LINK_BURST, LINK_BURST], skipped: [0, 0] }; this.links.set(key, l); }
     return l;
   }
 
@@ -128,14 +132,21 @@ export class Sim {
 
     const link = this.linkBetween(a, b);
     link.w = Math.min(link.w + 1, 60);
-    if (link.tokens < 1 || this.particles.length >= MAX_PARTICLES) return;
-    link.tokens--;
+    if (this.particles.length >= MAX_PARTICLES) return;
+    const dir = a === link.a ? 0 : 1;
+    if (link.tok[dir] < 1) {
+      link.skipped[dir] = Math.min(link.skipped[dir] + bytes, 200000); // remembered, shown by the next drawn packet
+      return;
+    }
+    link.tok[dir]--;
+    const shown = bytes + link.skipped[dir];
+    link.skipped[dir] = 0;
 
     this.particles.push({
       a, b, cat,
       t: -Math.random() * 0.06,
       dur: 0.7 + Math.random() * 0.3,
-      size: Math.max(0, Math.min(1, Math.log2(bytes / 40) / 5)),
+      size: Math.max(0, Math.min(1.4, Math.log2(shown / 40) / 5)),
       curve: a.id < b.id ? 1 : -1,
     });
   }
@@ -147,8 +158,9 @@ export class Sim {
   }
 
   step(dt) {
-    dt = Math.min(dt, 0.05);
     if (this.paused) return;
+    // real time, so packets and fades keep their speed on a slow screen (4 fps at worst)
+    dt = Math.min(dt, 0.25);
     const s = this.scale;
 
     // decay activity, expire idle hosts
@@ -161,11 +173,17 @@ export class Sim {
     }
     for (const [key, l] of this.links) {
       l.w *= Math.exp(-dt / 10);
-      l.tokens = Math.min(LINK_BUDGET, l.tokens + LINK_BUDGET * dt);
+      l.tok[0] = Math.min(LINK_BURST, l.tok[0] + LINK_RATE * dt);
+      l.tok[1] = Math.min(LINK_BURST, l.tok[1] + LINK_RATE * dt);
       if (l.w < 0.02 || !this.nodes.has(l.a.id) || !this.nodes.has(l.b.id)) this.links.delete(key);
     }
 
-    this.layout(dt, s);
+    // the layout runs in small steps so it stays stable however long the frame was
+    for (let left = dt; left > 1e-6;) {
+      const h = Math.min(left, 0.05);
+      this.layout(h, s);
+      left -= h;
+    }
 
     // packets in flight
     for (const p of this.particles) {
@@ -232,7 +250,7 @@ export class Sim {
       // the Internet node sits far above the LAN, so its many links are long and soft
       const toNet = l.a.fixed || l.b.fixed;
       const rest = (toNet ? this.h * 0.4 : 180 * s);
-      const k = (toNet ? 0.08 : 0.5) * Math.min(1, l.w / 6);
+      const k = (toNet ? 0.08 : 0.5) * Math.min(1, l.w / 2); // saturates fast, so packet bursts don't flicker the force
       const f = k * (d - rest);
       add(l.a, (dx / d) * f, (dy / d) * f);
       add(l.b, -(dx / d) * f, -(dy / d) * f);
@@ -266,14 +284,24 @@ export class Sim {
         continue;
       }
       if (n.pinned) { n.vx = n.vy = 0; continue; }
-      n.vx = (n.vx + fx.get(n) * dt) * Math.exp(-3.5 * dt);
-      n.vy = (n.vy + fy.get(n) * dt) * Math.exp(-3.5 * dt);
+      // Small net forces come from traffic flickering the link weights, not from anything
+      // that should move a host. Ignoring them lets the layout settle and stay settled.
+      let ax = fx.get(n), ay = fy.get(n);
+      const mag = Math.hypot(ax, ay), dead = 12 * s;
+      if (mag <= dead) { ax = ay = 0; } else { const k = (mag - dead) / mag; ax *= k; ay *= k; }
+      n.vx = (n.vx + ax * dt) * Math.exp(-5 * dt);
+      n.vy = (n.vy + ay * dt) * Math.exp(-5 * dt);
       const sp = Math.hypot(n.vx, n.vy), max = 500 * s;
       if (sp > max) { n.vx *= max / sp; n.vy *= max / sp; }
       n.x += n.vx * dt;
       n.y += n.vy * dt;
-      n.x = Math.max(this.w * pad, Math.min(this.w * (1 - pad), n.x));
-      n.y = Math.max(this.h * 0.2, Math.min(this.h * 0.8, n.y));
+      // a wall absorbs the motion instead of fighting it every frame
+      const nx = Math.max(this.w * pad, Math.min(this.w * (1 - pad), n.x));
+      const ny = Math.max(this.h * 0.2, Math.min(this.h * 0.8, n.y));
+      if (nx !== n.x) n.vx = 0;
+      if (ny !== n.y) n.vy = 0;
+      n.x = nx;
+      n.y = ny;
     }
   }
 

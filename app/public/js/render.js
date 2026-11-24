@@ -3,6 +3,7 @@
 import { CATS } from './sim.js';
 
 const BG = '#070b14';
+const TAIL = [1, 3, 6]; // comet tail samples per packet at quality 0, 1, 2
 const GROUP_COLORS = ['#3FB8AF', '#8E7CC3', '#E0A458', '#5C9DE0', '#D16BA5', '#7FB069'];
 
 function rgb(hex) {
@@ -31,6 +32,7 @@ export class Renderer {
     this.ctx = canvas.getContext('2d');
     this.sim = sim;
     this.labels = 'auto'; // auto | all | off
+    this.quality = 2;     // 2 full detail, 1 lighter, 0 lightest (set by main.js when a screen is slow)
     this.mode = 'graph';  // graph | grid
     this.grid = null;
     this.sprites = {};
@@ -46,6 +48,21 @@ export class Renderer {
     this.canvas.height = Math.round(h * dpr);
     this.dpr = dpr;
     this.sim.setSize(w, h);
+
+    // the background never changes, so draw it once instead of building a gradient every frame
+    const bg = document.createElement('canvas');
+    bg.width = Math.round(w * dpr);
+    bg.height = Math.round(h * dpr);
+    const g = bg.getContext('2d');
+    g.scale(dpr, dpr);
+    g.fillStyle = BG;
+    g.fillRect(0, 0, w, h);
+    const vg = g.createRadialGradient(w / 2, h * 0.55, 0, w / 2, h * 0.55, Math.max(w, h) * 0.7);
+    vg.addColorStop(0, 'rgba(40,60,110,0.22)');
+    vg.addColorStop(1, 'rgba(7,11,20,0)');
+    g.fillStyle = vg;
+    g.fillRect(0, 0, w, h);
+    this.bgCanvas = bg;
   }
 
   colorForGroup(g) {
@@ -71,13 +88,7 @@ export class Renderer {
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
     if (this.mode === 'grid' && this.grid) { this.grid.draw(ctx, sim.w, sim.h, s); return; }
-    ctx.fillStyle = BG;
-    ctx.fillRect(0, 0, sim.w, sim.h);
-    const vg = ctx.createRadialGradient(sim.w / 2, sim.h * 0.55, 0, sim.w / 2, sim.h * 0.55, Math.max(sim.w, sim.h) * 0.7);
-    vg.addColorStop(0, 'rgba(40,60,110,0.22)');
-    vg.addColorStop(1, 'rgba(7,11,20,0)');
-    ctx.fillStyle = vg;
-    ctx.fillRect(0, 0, sim.w, sim.h);
+    ctx.drawImage(this.bgCanvas, 0, 0, sim.w, sim.h);
 
     this.drawGroups(ctx, s);
     this.drawLinks(ctx, s);
@@ -136,10 +147,11 @@ export class Renderer {
       const sprite = this.sprites[p.cat];
       const head = (9 + 12 * p.size) * s;
       const e = p.t < 0.5 ? 2 * p.t * p.t : 1 - 2 * (1 - p.t) * (1 - p.t); // ease in/out
-      for (let i = 0; i < 6; i++) {
-        const te = Math.max(0, e - i * 0.028);
+      const tail = TAIL[this.quality];
+      for (let i = 0; i < tail; i++) {
+        const te = Math.max(0, e - i * (0.168 / tail));
         const [x, y] = this.position(p, te);
-        const k = 1 - i / 6;
+        const k = 1 - i / tail;
         ctx.globalAlpha = 0.9 * k * k;
         const sz = head * (0.55 + 0.45 * k);
         ctx.drawImage(sprite, x - sz, y - sz, sz * 2, sz * 2);
@@ -172,13 +184,15 @@ export class Renderer {
       const fade = Math.max(0, Math.min(1, (90 - n.age) / 20));
       ctx.globalAlpha = fade;
 
-      const halo = ctx.createRadialGradient(n.x, n.y, r * 0.5, n.x, n.y, r * 2.6);
-      halo.addColorStop(0, `rgba(${cr},${cg},${cb},${0.25 + 0.35 * n.flash})`);
-      halo.addColorStop(1, `rgba(${cr},${cg},${cb},0)`);
-      ctx.fillStyle = halo;
-      ctx.beginPath();
-      ctx.arc(n.x, n.y, r * 2.6, 0, Math.PI * 2);
-      ctx.fill();
+      if (this.quality >= 2) { // the soft glow is the costliest part of a node, so it goes first
+        const halo = ctx.createRadialGradient(n.x, n.y, r * 0.5, n.x, n.y, r * 2.6);
+        halo.addColorStop(0, `rgba(${cr},${cg},${cb},${0.25 + 0.35 * n.flash})`);
+        halo.addColorStop(1, `rgba(${cr},${cg},${cb},0)`);
+        ctx.fillStyle = halo;
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, r * 2.6, 0, Math.PI * 2);
+        ctx.fill();
+      }
 
       ctx.fillStyle = n.flash > 0.01 ? `rgb(${Math.round(18 + 120 * n.flash)},${Math.round(26 + 130 * n.flash)},${Math.round(44 + 140 * n.flash)})` : '#121a2c';
       ctx.strokeStyle = col;
@@ -195,9 +209,11 @@ export class Renderer {
         ctx.font = `${named ? 600 : 500} ${16 * s}px system-ui, sans-serif`;
         ctx.textAlign = 'center';
         ctx.lineJoin = 'round';
-        ctx.lineWidth = 5 * s;
-        ctx.strokeStyle = 'rgba(7,11,20,0.9)';
-        ctx.strokeText(text, n.x, n.y + r + 20 * s);
+        if (this.quality >= 1) {
+          ctx.lineWidth = 5 * s;
+          ctx.strokeStyle = 'rgba(7,11,20,0.9)';
+          ctx.strokeText(text, n.x, n.y + r + 20 * s);
+        }
         ctx.fillStyle = named ? '#f2f6ff' : '#aab6cf';
         ctx.fillText(text, n.x, n.y + r + 20 * s);
       }

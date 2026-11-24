@@ -202,7 +202,8 @@ setInterval(() => {
     if (rawClients.size) send(rawClients, 'packets', batch);
     if (aliaser) {
       // always alias, even with no viewer, so a viewer that connects later gets every name
-      const mapped = batch.map((p) => ({ s: aliasAddr(p.s), d: aliasAddr(p.d), c: p.c, b: p.b }));
+      // t (capture time) is kept so the page can play packets back at their real rhythm
+      const mapped = batch.map((p) => ({ t: p.t, s: aliasAddr(p.s), d: aliasAddr(p.d), c: p.c, b: p.b }));
       const fresh = newAliasNames.splice(0);
       if (aliasClients.size) {
         for (const n of fresh) send(aliasClients, 'name', n);
@@ -347,7 +348,11 @@ function replay(rl) {
     }
     if (t0 === null) { t0 = queue[0].t; wall0 = Date.now(); }
     const elapsed = ((Date.now() - wall0) / 1000) * opts.speed;
-    while (queue.length && queue[0].t - t0 <= elapsed) onPacket(queue.shift());
+    while (queue.length && queue[0].t - t0 <= elapsed) {
+      const p = queue.shift();
+      p.t = Date.now() / 1000; // the file's timestamps are old; the replay's own clock is what viewers should see
+      onPacket(p);
+    }
   }, 20);
   timer.unref();
 }
